@@ -478,6 +478,78 @@ describe('stream-pure', () => {
     expect(result.aborted).toBe(true)
   })
 
+  describe('synthetic user injection for strict chat templates', () => {
+    async function runWithCapturedRequest(
+      messages: Array<{ role: string; content: string; toolCalls?: unknown; toolCallId?: string }>,
+    ) {
+      let capturedRequest:
+        { messages: Array<{ role: string; content: string; isSyntheticPrompt?: boolean }> } | undefined
+      const client = {
+        complete: async () => {
+          throw new Error('Not implemented')
+        },
+        getModel: () => 'test-model',
+        getProfile: () => ({}) as never,
+        getBackend: () => 'unknown' as const,
+        setBackend: () => {},
+        setModel: () => {},
+        stream: async function* (request: {
+          messages: Array<{ role: string; content: string; isSyntheticPrompt?: boolean }>
+        }) {
+          capturedRequest = request
+          yield { type: 'done', response: mockResponse }
+        },
+      }
+      const gen = streamLLMPure({
+        messageId: 'msg-synthetic',
+        systemPrompt: 'system',
+        llmClient: client as never,
+        messages: messages as never,
+      })
+      await consumeStreamGenerator(gen, () => {})
+      return capturedRequest
+    }
+
+    it('injects a synthetic user turn when the request has no user (compaction summary first)', async () => {
+      const captured = await runWithCapturedRequest([
+        { role: 'assistant', content: '[compaction summary]' },
+        { role: 'tool', content: 'result', toolCallId: 'call-1' },
+      ])
+
+      expect(captured).toBeDefined()
+      expect(captured!.messages.some((m) => m.role === 'user')).toBe(true)
+      const synthetic = captured!.messages.find((m) => m.role === 'user')
+      expect(synthetic).toMatchObject({ role: 'user', content: 'Continue.', isSyntheticPrompt: true })
+    })
+
+    it('injects a synthetic user turn on the tool-loop continuation (assistant + tool, no user)', async () => {
+      const captured = await runWithCapturedRequest([
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'run_command', arguments: {} }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'call-1' },
+      ])
+
+      expect(captured!.messages.some((m) => m.role === 'user')).toBe(true)
+      expect(captured!.messages.filter((m) => m.role === 'user')).toHaveLength(1)
+    })
+
+    it('does not inject when a real user message is already present', async () => {
+      const captured = await runWithCapturedRequest([{ role: 'user', content: 'hello' }])
+
+      expect(captured!.messages.filter((m) => m.role === 'user')).toHaveLength(1)
+      expect(captured!.messages.some((m) => m.isSyntheticPrompt)).toBe(false)
+    })
+
+    it('does not inject into a system-only request', async () => {
+      const captured = await runWithCapturedRequest([{ role: 'system', content: 'system' }])
+
+      expect(captured!.messages.some((m) => m.role === 'user')).toBe(false)
+    })
+  })
+
   describe('prefTokenIncrement with context caching', () => {
     it('computes prefillSpeed from increment not total tokens when previousContextTokens provided', () => {
       const metrics = new TurnMetrics()

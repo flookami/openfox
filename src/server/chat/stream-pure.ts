@@ -52,6 +52,10 @@ export interface PureStreamOptions {
     toolCalls?: ToolCall[]
     toolCallId?: string
     attachments?: Attachment[]
+    /** Set on the synthetic `user` turn injected to satisfy strict chat
+     * templates that require at least one user message per request. Never
+     * persisted or rendered — request only. */
+    isSyntheticPrompt?: boolean
   }>
   tools?: LLMToolDefinition[]
   toolChoice?: 'auto' | 'none' | 'required'
@@ -264,6 +268,15 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
 
   // Build LLM messages
   const llmMessages = [{ role: 'system' as const, content: systemPrompt }, ...messages]
+
+  // Strict chat templates (e.g. Ornith, some Ollama models) reject any request
+  // that has no `user` turn. Compaction stores the summary as an `assistant`
+  // message and the tool-loop continuation only has `assistant` + `tool` turns,
+  // so both can open the request without a user turn. Inject a synthetic,
+  // request-only `user` turn to satisfy the invariant without changing semantics.
+  if (!llmMessages.some((m) => m.role === 'user') && !llmMessages.every((m) => m.role === 'system')) {
+    llmMessages.push({ role: 'user', content: 'Continue.', isSyntheticPrompt: true })
+  }
 
   // Compute modelParams from request and profile
   const profile = getModelProfile(llmClient.getModel())
